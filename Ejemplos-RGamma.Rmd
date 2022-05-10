@@ -1,0 +1,583 @@
+---
+title: "Ejemplos de regresión gamma"
+author: "Oihane Álvarez, Gabriel Carbonell, Daniel Hernández, Celia Sifre"
+date: "08/05/2022"
+output:
+  html_document: default
+  pdf_document: default
+header-includes:
+      - \usepackage{caption}
+      - \captionsetup[figure]{labelformat=empty}
+---
+
+```{r setup, include=FALSE}
+library(car)
+library(tidyverse)
+library(corrplot)
+library(caret)
+library(knitr)
+library(gridExtra)
+library(boot)
+knitr::opts_chunk$set(message = FALSE, 
+                      warning = FALSE, 
+                      out.width = "75%", 
+                      fig.align = "center")
+```
+
+## Análisis de la pelea final de *Los Vengadores: Endgame*.
+
+### Introducción
+
+Para la realización de este ejercicio he empleado la base de datos **avengers.csv** de la librería `flexplot`. He modificado la base de datos para solo tener en cuenta las variables que se emplean en este **[video](https://www.youtube.com/watch?v=HmMag6EvNyQ&ab_channel=QuantPsych)** y les he cambiado el nombre. Si queréis la base de datos original, la podeís encontrar en este **[enlace](https://github.com/dustinfife/flexplot/blob/master/data/avengers.csv)**.
+
+Esta base de datos contiene originalmente los atributos de combate de 812 luchadores en la pelea final de *Los Vengadores: Endgame*. Para este ejercicio solo se emplearán 3 atributos, que son los siguientes: **minutes.fighting** (renombrado a T_Batalla), son los minutos que un luchador es capaz de durar en la batalla hasta que muere o se rinde; **willpower** (renombrado a Determinacion), que según la documentación, está determinado por el periódo de tiempo que el luchador es capaz de esperar en la DMV (aquí en España es la DGT) para que le entreguen el carnet de conducir; y finalmente, **injuries** (renombrado a Heridas) que es el número de heridas que pueden soportar.
+
+```{r, out.width="400px", echo = F, fig.cap="Escena de la batalla final de Los Vengadores: Endgame"}
+include_graphics("data/batalla-final.png")
+```
+
+En este ejercicio vamos a tratar de modelizar el tiempo en batalla (T_batalla) en función de las variables **Determinación** y **Heridas** empleando la regresión gamma.
+
+En primer lugar vamos a cargar el banco de datos, y siguiendo la forma en que trata a la variable **Heridas** en el vídeo del enlace del primer párrafo, vamos a categorizar en tres grupos la variable **Heridas** mediante la función `cut()`.
+
+```{r}
+datos <- read.csv("avengers_mod.csv");datos <- datos[-437,] ## valor negativo de determinación
+datos$Heridas <- cut(datos$Heridas, breaks = c(-1,2,4,5),labels = c("0-2","3-4","5+"))
+```
+
+Con esto realizado, podemos empezar con la parte de estadística descriptiva del banco de datos.
+
+### Análisis previo descriptivo del banco de datos
+
+En primer lugar vamos a obtener un resumen numérico de las variables mediante la función `summary()`.
+
+```{r}
+summary(datos)
+```
+
+Observamos que no hay ningún valor ausente en ninguna de las variables. La mayoría de los valores de nuestra variable respuesta **T_batalla** se concentran en el intervalo [1.10,13.12] quedando algunos de estos valores muy alejados del resto. En cuanto a los valores de la variable **Determianción** podemos intuir que son bastante simétricos, con media en 59.99. Finalmente, en cuanto a la variable **Heridas** podemos decir que la hay un número similar de luchadores con 0-2 heridas, que con 3-4 y que con 5+,siendo el grupo con 3-4 heridas el más numeroso.
+
+Pasamos ahora a la parte gráfica del análisis descriptivo. Vamos a comenzar esta parte obteniendo el histograma **T_batalla**.
+
+```{r, fig.align='center', fig.height=3, fig.width=7}
+ggplot(data = datos, aes(T_batalla)) +
+  geom_histogram(color = "dodgerblue", fill = "skyblue") + 
+  labs(title = "Figura 1. Histograma de T_batalla") +
+  theme_bw()
+```
+
+El histograma cumple con una de las particularidades de la distribución gamma: es asimétrica por la derecha. Observamos que las probabilidades de que un luchador esté mucho tiempo peleando son muy bajas, durando la mayoría de ellos tiempos comprendidos entre los 0 y los 25 minutos.
+
+Ahora vamos a ver qué tipo de relación hay entre las variables. Para ello, vamos a obtener el diagrama de dispersión entre **T_batalla** y **Determinacion** .
+
+```{r,fig.align='center', fig.height=3, fig.width=7}
+ggplot(data = datos, aes(x = Determinacion, y = T_batalla)) +
+  labs(title = "Figura 2. Diagrama de dispersión T_batalla frente a Determinacion") +
+  geom_point() + theme_bw()
+```
+
+A través de este diagrama podemos intuir que cuanto mayor es la **Determinacion** mayor es el tiempo en batalla. Sin embargo, no está del todo claro. Así que vamos a ver si hay alguna relación si añadimos la variable **Heridas** y obtenemos un diagrama de dispersión para cada grupo.
+
+```{r,fig.align='center', fig.height=3, fig.width=7}
+ggplot(data = datos, aes(x = Determinacion, y = T_batalla)) +
+  labs(title = "Figura 3. Diagramas de dispersión de T_batalla frente a Determinacion por grupos de Heridas") +
+  geom_point() + facet_wrap(~Heridas)  + theme_bw() +
+  theme(plot.title = element_text(size=11))
+```
+
+Ahora la relación parece bastante más clara. A mayor **Determinación** máyor es **T_batalla**, solo que la variable **Heridas** disminuye el efecto que tiene la **Determinacion**, de modo que a mayor número de heridas, menos importante es el efecto de **Determinacion**. Es decir, parece que hay interacción entre las variables **Determinacion** y **Heridas**.
+
+
+### Modelización Lineal
+
+Aunque sepamos que estamos analizando una variable continua no negativa, ajustamos los datos a un modelo lineal para observar si se ajusta adecuadamente.
+
+```{r}
+mod.lineal <- lm(T_batalla ~ ., data=datos)
+summary(mod.lineal)
+par(mfrow=c(2,2)); plot(mod.lineal);par(mfrow=c(1,1))
+```
+
+Como podemos observar en los plots de diagnóstico, los residuos no se ajustan adecuadamente. En primer lugar, el gráfico *residuals vs. fitted* no sugiere una relación lineal perfecta, puesto que hay residuos que no siguen la línea horizontal. muchos de los residuos se distribuyen a lo largo de la línea horizontal. Por otra parte, el QQ plot muestra como la mayoría de los residuos caen en la línea de referencia, pero no así el extremo superior. Esto sugiere que los datos siguen una distribución de cola larga. Tampoco parece que se cumpla adecuadamente la hipótesis de homocedasticidad. El gráfico del *leverage* muestra también muchos valores extremos. Por tanto, la regresión gaussiana no parece la mejor alternativa para modelizar estos datos.
+
+
+### Modelización con Regresión Gamma
+
+Como estamos analizando una variable continua no negativa en la que de forma general su varianza parece aumentar con la media, parece razonable emplear un ajuste con una regresión gamma.
+
+La variable respuesta $Y_{ij}$ representa el número de minutos que aguanta en combate el luchador *i* perteneciente al grupo *j* de la variable **Heridas**.
+
+La variable respuesta $Y_{ij}$ se distribuye Gamma de parámetros $\nu$ y $\lambda$:
+
+$$
+Y_{ij} \sim Ga(\nu_{ij}, \lambda_{ij})
+$$
+
+La componente sistemática del modelo está formada por 2 variables explicativas (**Determinación**, variable cuantitativa continua, y **Heridas**, variable categórica ordinal).
+
+Sabemos que $\lambda = \nu / \mu$, por lo que $E(Y_{ij})=\frac{\nu}{\lambda}=\mu_{ij}$. Para relacionar el predictor lineal con la respuesta media, podemos emplear 3 funciones link:
+
+* La función *inversa*: $g(\mu_{ij}) = \frac{1}{\mu_{ij}}$
+* La función *log*: $g(\mu_{ij}) = \log \mu_{ij}$ 
+* La función *identidad*: $g(\mu_{ij}) = \mu_{ij}$ 
+
+De tal forma que el predictor lineal queda:
+$$
+g(\mu_{ij}) = \beta_0 + \beta_1 x_{i} + \gamma_1 d_j +\gamma_2 d_j
+$$
+
+donde $x_{ij}$ es la **Determinación** del individuo *i* y **dj** es una variable indicadora para la que $\gamma_1 \cdot 1$ si **Heridas** = 3-4 y $\gamma_2 \cdot1$ si **Heridas** = 5+.
+
+### Ajuste con función link inversa
+
+Como el modelo no tiene muchas covariables, vamos a ajustar manualmente 4 modelos distintos: un primer modelo reducido en el que solo hay una variable explicativa (Determinacion); un segundo modelo completo con solo los efectos pricipales de las dos variables explicativas; un tercer modelo con los efectos principales y la interacción entre las variables explicativas; y un cuarto modelo con el efecto principal de la variable **Determinacion** y su interacción con la variable **Heridas**.
+
+```{r, fig.align='center', fig.height=4, fig.width=8}
+inv.reducido <- glm(T_batalla ~ Determinacion, data = datos, family = Gamma(link = "inverse"))
+summary(inv.reducido)
+par(mfrow = c(2,2), mar = c(2.1,4,2.1,4))
+plot(inv.reducido)
+
+inv.completo <- glm(T_batalla ~ Determinacion + Heridas,
+                    data = datos, family = Gamma(link = "inverse"))
+summary(inv.completo)
+
+inv.interac <- glm(T_batalla ~ Determinacion*Heridas, 
+                   data = datos, family = Gamma(link = "inverse"))
+summary(inv.interac)
+
+inv.red.int <- glm(T_batalla ~ Determinacion + Determinacion:Heridas,
+                   data = datos, family = Gamma(link = "inverse"))
+summary(inv.red.int)
+```
+
+En general, la aplicabilidad de estos modelos falla en la hipótesis de normalidad. Vemos que el diagrama de cuantiles normales indica que los residuos grandes se desvían mucho de la línea teórica, y a simple vista parece que hay problemas leves de homocedasticidad, aunque no muy preocupantes. Por temas de espacio, solo hemos incluído las gráficas del primer modelo, las del resto de modelos son muy similares, así que no aporta mucho para el espacio que ocupan.
+
+Ahora vamos a probar a introducir términos polinómicos de la variable **Determinacion** con tal de ver si mejora tanto el ajuste como la aplicabilidad. Vamos a automatizar la búsqueda del mejor modelo con términos polinómicos, de tal forma que nos quedaremos con aquel que tenga menor AIC.
+
+```{r}
+AICs <- c()
+for(i in 1:6){
+  model <- glm(T_batalla ~ poly(Determinacion,i), data = datos, 
+               family = Gamma(link = "inverse"))
+  AICs[i] <- model$aic
+}
+AICs
+```
+
+Atendiendo a los valores del AIC el mejor modelo sería el del polinomio de grado 6, sin embargo, la diferencia con el modelo de grado 1 es insignificante, así que por simplicidad, nos quedamos con el modelo del polinomio de grado 1.
+
+Vamos a probar también con la transformación logaritmica de **Determinación** y ver si mejora el modelo.
+
+```{r}
+summary(mod.log <- glm(T_batalla ~ log(Determinacion), 
+                       data = datos, family = Gamma(link = "inverse")))
+```
+
+Estrictamente hablando la transformación logaritmica de **Determinación** mejora el ajuste del modelo, así que en este caso vamos a conservarla porque no añade complejidad al modelo.
+
+A continuación vamos a introducir la variable **Heridas** al modelo con la transformación logaritmica. Vamos a ajustar un primer modelo con solo los efectos principales y un segundo modelo que incluye también la interacción.
+
+```{r}
+summary(mod.log.completo <-  glm(T_batalla ~ log(Determinacion)+Heridas,
+                                 data = datos, family = Gamma(link = "inverse")))
+
+summary(mod.log.inter <-  glm(T_batalla ~ log(Determinacion)*Heridas, 
+                              data = datos, family = Gamma(link = "inverse")))
+```
+
+De nuevo, por simplicidad, vamos a escoger el modelo sin interacciones, pese a que su AIC sea un par de unidades mayor que el que incluye las interacciones.
+
+Finalmente, mediante validación cruzada vamos a ver qué modelo predice mejor. Dicho modelo será con el que nos quedemos. Vamos a comparar los modelos completos con y sin transformación logarítmica, pues tienen un AIC similar, si bien el de la transformación logarítmica es algo menor.
+
+```{r}
+set.seed(1)
+cv.glm(datos, inv.completo, K = 10)$delta
+cv.glm(datos, mod.log.completo, K = 10)$delta
+```
+
+Ambos modelos cometen un error de predicción prácticamente idéntico de modo que por interpretabilidad escogemos el modelo sin la transformación logarítmica. Determinamos que proporción de la DEVIANCE explica el modelo.
+
+```{r}
+1-(inv.completo$deviance/inv.completo$null.deviance)
+```
+
+Por lo tanto, para este modelo en el cual se ha empleado el enlace inverse, se consigue un AIC=4549 y un porcentaje de la DEVIANCE explicada del 44.67%.
+
+### Ajuste con función link log
+
+Para este ajuste vamos a seguir un proceso idéntico al seguido con la función link inversa. Comenzamos ajustando 4 modelos: un modelo reducido, un modelo completo, un modelo con las interacciones y un modelo reducido con interacción.
+
+```{r, fig.align='center', fig.height=4, fig.width=8}
+log.reducido <- glm(T_batalla ~ Determinacion, data = datos, family = Gamma(link = "log"))
+summary(log.reducido)
+par(mfrow = c(2,2), mar = c(2.1,4,2.1,4))
+plot(inv.reducido)
+
+log.completo <- glm(T_batalla ~ Determinacion + Heridas, data = datos, family = Gamma(link = "log"))
+summary(log.completo)
+
+log.interac <- glm(T_batalla ~ Determinacion*Heridas, data = datos, family = Gamma(link = "log"))
+summary(log.interac)
+
+log.red.int <- glm(T_batalla ~ Determinacion + Determinacion:Heridas,
+                   data = datos, family = Gamma(link = "log"))
+summary(log.red.int)
+```
+
+De entre estos cuatro modelos, el que mejor ajuste produce es el modelo completo con interacciones, con un AIC de 4544.8, el más bajo de entre los cuatro. Al igual que ocurría con los modelos con la función link inversa, estos modelos tienen los mismos problemas de aplicabilidad. Por temas de espacio, solo se incluyen las gráficas del primer modelo, las del resto son muy similares así que no merece la pena incluirlas.
+
+Ahora vamos a probar a introducir términos polinómicos de la variable **Determinacion** con tal de ver si mejora tanto el ajuste como la aplicabilidad. Vamos a automatizar la búsqueda del mejor modelo con términos polinómicos, de tal forma que nos quedaremos con aquel que tenga menor AIC.
+
+```{r}
+AICs <- c()
+for(i in 1:6){
+  model <- glm(T_batalla ~ poly(Determinacion,i), data = datos, family = Gamma(link = "log"))
+  AICs[i] <- model$aic
+}
+AICs
+```
+
+El modelo con el solo el término polinómico de grado 1 es el que menor AIC tiene. Vamos a continuar la modelización teniendo eso en cuenta. Vamos a probar también con la transformación logaritmica de **Determinación** y ver si mejora el modelo.
+
+```{r}
+summary(mod.log <- glm(T_batalla ~ log(Determinacion), data = datos, family = Gamma(link = "log")))
+```
+
+El logaritmo no mejora el ajuste con respecto al mismo modelo sin la transformación, así que finalmente, vamos a ver el error de prediccion cometido por el modelo completo con interacciones mediante validación cruzada.
+
+```{r}
+set.seed(1)
+cv.glm(datos, log.interac, K = 10)$delta
+```
+
+Haber empleado la función link log no ha supuesto ninguna mejora ni ningún empeoramiento sobre el error medio del modelo con la función link inversa. Determinamos que proporción de la DEVIANCE explica el modelo.
+
+```{r}
+1-(log.interac$deviance/log.interac$null.deviance)
+```
+
+Por lo tanto, para este modelo en el cual se ha empleado el enlace inverse, se consigue un AIC=4544 y un porcentaje de la DEVIANCE explicada del 45.28%.
+
+### Ajuste con función link identidad
+
+Para este ajuste vamos a seguir un proceso idéntico al seguido con la función link inversa  y log. Comenzamos ajustando 4 modelos: un modelo reducido, un modelo completo, un modelo con las interacciones y un modelo reducido con interacción.
+
+```{r, fig.align='center', fig.height=4, fig.width=8}
+ident.reducido <- glm(T_batalla ~ Determinacion, data = datos, family = Gamma(link = "identity"))
+summary(ident.reducido)
+par(mfrow = c(2,2), mar = c(2.1,4,2.1,4))
+plot(ident.reducido)
+
+ident.completo <- glm(T_batalla ~ Determinacion + Heridas, 
+                      data = datos, family = Gamma(link = "identity"))
+summary(ident.completo)
+
+ident.interac <- glm(T_batalla ~ Determinacion*Heridas, 
+                     data = datos, family = Gamma(link = "identity"))
+summary(ident.interac)
+
+ident.red.int <- glm(T_batalla ~ Determinacion + Determinacion:Heridas, 
+                     data = datos, family = Gamma(link = "identity"))
+summary(ident.red.int)
+```
+
+De entre estos cuatro modelos, el que mejor ajuste produce es el modelo completo con interacciones, con un AIC de 4545.7, el más bajo de entre los cuatro. Al igual que ocurría con los modelos con la función link inversa, estos modelos tienen los mismos problemas de aplicabilidad. Las gráficas de todos los modelos son muy similares, así que solamente se ha incluído las del primer modelo.
+
+Ahora vamos a probar a introducir términos polinómicos de la variable **Determinacion** con tal de ver si mejora tanto el ajuste como la aplicabilidad. Vamos a automatizar la búsqueda del mejor modelo con términos polinómicos, de tal forma que nos quedaremos con aquel que tenga menor AIC.
+
+```{r}
+AICs <- c()
+for(i in 1:6){
+  model <- glm(T_batalla ~ poly(Determinacion,i), data = datos,
+               family = Gamma(link = "identity"))
+  AICs[i] <- model$aic
+}
+AICs
+```
+
+Atendiendo a los valores del AIC el mejor modelo sería el del polinomio de grado 2, sin embargo, la diferencia con el modelo de grado 1 es insignificante, así que por simplicidad, nos quedamos con el modelo del polinomio de grado 1.
+
+La transformación logaritmica de **Determinación** con la función link identity no produce un modelo porque no es capaz de encontrar un conjunto válido de coeficientes. Por lo que no vamos a contar con dicha transformación. Finalmente, vamos a ver el error de predicción cometido por el modelo completo con interacciones mediante validación cruzada.
+
+```{r}
+set.seed(1)
+cv.glm(datos, ident.interac, K = 10)$delta
+```
+
+Haber empleado la función link log no ha supuesto ninguna mejora ni ningún empeoramiento sobre el error medio de los modelo con las funciones link inversa y log. Determinamos que proporción de la DEVIANCE explica el modelo.
+
+```{r}
+1-(ident.interac$deviance/ident.interac$null.deviance)
+```
+
+Por lo tanto, para este modelo en el cual se ha empleado el enlace inverse, se consigue un AIC=4544 y un porcentaje de la DEVIANCE explicada del 45.22%.
+
+### Comparación de modelos: Validación del ajuste y Capacidad predictiva
+
+A continuación se muestra una tabla comparativa a nivel ajuste y predicción de los diferente modelos.
+
+|*Link*     |Modelo      |%D explicada |AIC    |RMSE   |
+|:----------|:-----------|:------------|:------|:------|
+|*Inverso*  |Completo    |44.67        |4549.9 |53.6   |
+|*Logaritmo*|Interacción |45.28        |4544.8 |53.6   |
+|*Identidad*|Interacción |45.22        |4545.7 |53.5   |
+
+Por lo tanto, podemos determinar que no hay ningún modelo mucho mejor que otro en términos de ajuste y predicción, siendo el modelo con la función link logarítmica la que presenta, aunque por poco, un valor de AIC y DEVIANCE menor. Además, es el que mejor interpretabilidad tiene. 
+
+Finalmente, podemos ver graficamente los valores ajustados y observados del modelo seleccionado.
+
+```{r}
+par(mfrow=c(1,1))
+plot(log.interac$fitted.values, datos$T_batalla, main='Mejor modelo', xlab='Valores Ajustados', ylab='Valores Observados')
+abline(0,1)
+```
+
+### Modelo final
+
+Por ello, elegimos este modelo como modelo final.
+$$
+Y_{ij} \sim Ga(\nu_{ij}, \lambda_{ij})
+$$
+$$
+log(\mu_{ij}) = 2.06 + (0.012  -0.007d_{(3-4)}-0.005d_{(5+)})x_{i} + 0.03d_{(3-4)} -0.33 d_{(5+)}
+$$
+
+con $X_i$ como variable *Determinacion* y $d_j$ como variable indicadora de Heridas.
+
+Así pues:
+$$
+\widehat{E(Y_{ij})} = \mu_{ij} = exp(2.06 + (0.012  -0.007d_{(3-4)}-0.005d_{(5+)})x_{i} + 0.03d_{(3-4)} -0.33 d_{(5+)})
+$$
+Por lo tanto, el modelo se interpreta como cambios porcentuales en $E(Y_{ij})$ por cada incremento de una unidad en $X_i$ (% = $100 \cdot (e^{\beta_i})$).
+
+## Análisis del BMI mediante regresión gamma
+
+
+### Introducción
+
+El siguiente análisis consiste en la modelización mediante regresión gamma de los datos de la *American Time Use Survey (ATUS) Eating & Health Module* de 2014. Concretamente, se modelizará el BMI en función del resto de variables.
+
+Se puede encontrar más información sobre los datos en [su pagína web](https://www.bls.gov/tus/ehdatafiles.htm), aunque el dataset empleado en este caso es una conversión a CSV que se puede encontrar en [Kaggle](https://www.kaggle.com/datasets/bls/eating-health-module-dataset).
+
+En primer lugar, cargamos los datos (eliminando aquellas observaciones para las que el BMI reportado sea 0, ya que es imposible):
+
+```{r}
+bmi_data <- read_csv("data/ehresp_2014.csv", show_col_types = FALSE) %>%
+filter(erbmi > 0)
+```
+
+
+### Análisis descriptivo
+
+```{r}
+bmi <- bmi_data
+str(bmi, give.attr=FALSE)
+```
+
+Tenemos un banco de datos con `r dim(bmi_data)[1]` observaciones y `r dim(bmi_data)[2]` variables. Las dos primeras variables son variables de identificación, y la última es de etiquetado, por lo que las eliminamos por simplicidad.
+
+```{r}
+bmi <- bmi[, -c(1, 2, 37)]
+```
+
+Respecto a las variables restantes, podemos destacar que:
+
+* "erbmi" es una variable cuantitativa continua, y constituye nuestra variable respuesta.
+* "ertpreat", "ertseat", "euexfreq", "eufastfdfrq", "eufinlwgt", "euhgt", "euwgt" son variables cuantitativas.
+* El resto de variables son cualitativas, por lo que han de ser convertidas a factor.
+
+En primer lugar, observamos las correlaciones entre las variables.
+
+```{r out.width="100%"}
+corrplot(cor(bmi), type = "upper")
+```
+
+Se aprecian correlaciones entre las variables que aportan información similar. En el caso del BMI una correlación importante con el peso. Respecto a las variables cuantitativas:
+
+```{r}
+no.factor <- c("erbmi", "ertpreat", "ertseat", "euexfreq", "eufastfdfrq", 
+               "eufinlwgt", "euhgt", "euwgt")
+
+summary(bmi[,no.factor])
+```
+
+```{r}
+par(mfrow=c(2,4))
+boxplot(bmi$erbmi, main="erbmi")
+boxplot(bmi$ertpreat, main="ertpreat")
+boxplot(bmi$ertseat, main="ertseat")
+boxplot(bmi$euexfreq, main="euexfreq")
+boxplot(bmi$eufastfdfrq, main="eufastfdfrq")
+boxplot(bmi$eufinlwgt, main="eufinlwgt")
+boxplot(bmi$euhgt, main="euhgt")
+boxplot(bmi$euwgt, main="euwgt")
+```
+
+Vemos que todas las variables muestran valores atípicos. En el caso del BMI es esperable por su distribución. Otras variables, como `ertseat` tienen un número mucho mayor, por lo que debe tenerse en cuenta al modelizar y diagnosticar el modelo.
+
+Una vez completada la descripción de las variables, convertimos a factor las variables categóricas:
+
+```{r}
+factor.names <- c("erhhch", "erspemch", "ethgt", "etwgt", "eudietsoda", "eudrink", 
+                  "eueat", "euexercise", "eufastfd", "euffyday", "eugroshp", 
+                  "euinclvl", "eusnap",  "eumeat", "eumilk", "euprpmel", "eusoda", 
+                  "eustores", "eustreason", "eutherm", "euwic",
+                  "eeincome1", "erincome", "eufdsit", "eugenhth", "euincome2")
+bmi[,factor.names] <- lapply(bmi[,factor.names], factor)
+
+summary(bmi[,factor.names])
+```
+
+
+### Búsqueda del modelo óptimo
+
+Como hemos visto, el BMI se distribuye aproximadamente como una gamma, por lo que aplicamos este tipo de regresión. EM primer lugar, obtenemos modelos completos con todos los links disponibles, para luego hacer una selección de modelos. 
+
+```{r}
+full.id <- glm(erbmi ~ ., 
+             data = bmi,
+             family=Gamma(link="identity"))
+
+par(mfrow=c(2,2)); plot(full.id); par(mfrow=c(1,1))
+plot(residuals(full.id, type = "deviance"))
+```
+
+```{r}
+full.log <- glm(erbmi ~ ., 
+             data = bmi, 
+             family=Gamma(link="log"))
+
+par(mfrow=c(2,2)); plot(full.log); par(mfrow=c(1,1))
+plot(residuals(full.log, type = "deviance"))
+```
+
+```{r}
+full.inv <- glm(erbmi ~ ., # forumla
+             data = bmi, # dataset
+             family=Gamma(link="inverse"))
+
+par(mfrow=c(2,2)); plot(full.inv); par(mfrow=c(1,1))
+plot(residuals(full.inv, type = "deviance"))
+```
+
+Como vemos, los modelos completos cumplen condiciones como valores de los residuos DEVIANCE entre -2 y 2 en los tres *link*. Respecto al resto de diagnósticos, parece que el *link* identidad tiene mejores residuos.
+
+Ahora seleccionamos modelos, para lo que hacemos una búsqueda mediante `step`. Usaremos el mejor modelo estimado por la función.
+
+```{r results='hide', eval=FALSE}
+step.id.out <- step(full.id, direction = "backward")
+step.log.out <- step(full.log, direction = "backward")
+step.inv.out <- step(full.inv, direction = "backward")
+```
+
+```{r include=FALSE}
+# Carga de los resultados de step para ahorrar tiempo de compilación
+step.id.out <- readRDS("data/step.id.out.rds")
+step.log.out <- readRDS("data/step.log.out.rds")
+step.inv.out <- readRDS("data/step.inv.out.rds")
+```
+
+Por tanto, los modelos que ajustaremos serán:
+
+```{r}
+step.id.out$call
+step.inv.out$call
+step.log.out$call
+```
+
+
+```{r}
+step.id <- glm(erbmi ~ erincome + ethgt + etwgt + eusnap + eugenhth + 
+                 eugroshp + euhgt + eusoda + eustreason + euwgt, 
+               family = Gamma(link = "identity"), 
+               data = bmi)
+
+par(mfrow=c(2,2)); plot(step.id); par(mfrow=c(1,1))
+plot(residuals(step.id, type = "deviance"))
+```
+
+
+```{r}
+step.log <- glm(formula = erbmi ~ erspemch + ethgt + etwgt + eueat + euexfreq + 
+                  eufinlwgt + eugenhth + euhgt + euincome2 + eusoda + euwgt + 
+                  euwic, family = Gamma(link = "log"), data = bmi)
+par(mfrow=c(2,2)); plot(step.log); par(mfrow=c(1,1))
+plot(residuals(step.log, type = "deviance"))
+```
+
+```{r}
+step.inv <- glm(formula = erbmi ~ eeincome1 + erhhch + erincome + erspemch + 
+                  ethgt + etwgt + eueat + euexercise + euexfreq + eufastfd + 
+                  eufinlwgt + eusnap + eugenhth + euhgt + euincome2 + eumeat + 
+                  euprpmel + eusoda + euwgt + euwic, family = Gamma(link = "inverse"), 
+                data = bmi)
+par(mfrow=c(2,2)); plot(step.inv); par(mfrow=c(1,1))
+plot(residuals(step.inv, type = "deviance"))
+```
+
+En términos de AIC, el mejor modelo es el que emplea el enlace identidad, con AIC = 21647.03, contra el modelo con enlace logaritmo (AIC = 28302.22) y el de enlace inverso (AIC = 40643.39).
+
+Si lo comparamos en cuanto a varianza explicada:
+
+```{r}
+100 * (1 - (step.id$deviance/step.id$null.deviance))
+100 * (1 - (step.log$deviance/step.log$null.deviance))
+100 * (1 - (step.inv$deviance/step.inv$null.deviance))
+```
+
+De nuevo, el mejor modelo es el que emplea en enlace identidad, que explica un `r round(100 * (1 - (step.id$deviance/step.id$null.deviance)), 2)`% de la DEVIANCE. Si observamos sus coeficientes:
+
+```{r}
+summary(step.id)
+```
+
+Vemos que solo los coeficientes correspondientes a las variables `erincome`, `ethgt`, `euhgt` y `euwgt`, que se refieren a ingresos, peso y altura, son significativos.
+
+Al emplear un enlace identidad, podemos interpretar el modelo como que cada incremento de una unidad en $X_j$ hace crecer el valor esperado del BMI, $E(BMI)$ en $\beta_j$, asumiendo que el resto de variables se mantienen constantes.
+
+
+### Comparación con un modelo lineal
+
+A continuación, ajustaremos el mismo modelo que hemos estimado como óptimo para ver si hay diferencias.  
+
+```{r}
+gaussian <- glm(erbmi ~ erincome + ethgt + etwgt + eusnap + eugenhth + 
+                 eugroshp + euhgt + eusoda + eustreason + euwgt,
+             family = ("gaussian"),
+             data = bmi)
+
+par(mfrow=c(2,2)); plot(gaussian); par(mfrow=c(1,1))
+```
+
+Los residuos no se ajustan a la normalidad, además de ser heterocedásticos. Por tanto, vemos que la elección de un modelo gamma es más adecuado a la hora de describir los datos.
+
+
+### Validación cruzada
+
+Pese a que el objetivo del modelo no es la predicción, realizamos una verificación mediante validación cruzada para comprobar como se ajustan los valores. 
+
+```{r}
+set.seed(1)
+data_partition <- createDataPartition(bmi$erbmi, 
+                                      times = 1, p = 0.8, 
+                                      list = FALSE)
+
+train <- bmi[data_partition,]
+test  <- bmi[-data_partition,]
+
+cv.model <- glm(erbmi ~ erincome + ethgt + etwgt + eusnap + eugenhth + 
+                  eugroshp + euhgt + eusoda + eustreason + euwgt, 
+                family = Gamma(link = "identity"), 
+                data = test)
+
+prediction <- predict(cv.model, newdata=test, type="response")
+plot(test$erbmi, prediction)
+```
+
+Vemos que la relación es prácticamente lineal, aunque los valores extremos tienen más variabilidad.
+
+
+
+
+
